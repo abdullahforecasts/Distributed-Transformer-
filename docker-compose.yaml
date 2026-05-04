@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  decoder1:
+    build: .
+    command: ["8081"]
+
+  decoder2:
+    build: .
+    command: ["8082"]
+
+  decoder3:
+    build: .
+    command: ["8083"]
+
+  decoder4:
+    build: .
+    command: ["8084"]
+
+  decoder5:
+    build: .
+    command: ["8085"]

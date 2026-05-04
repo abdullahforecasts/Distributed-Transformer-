@@ -1,0 +1,15 @@
+FROM ubuntu:22.04
+
+RUN apt-get update && apt-get install -y g++
+
+WORKDIR /app
+
+# Copy your C++ file into the container
+COPY decoder.cpp .
+
+# Compile the program
+RUN g++ decoder.cpp -o main
+
+# Run the executable
+ENTRYPOINT ["./main"]
+CMD ["8080"]
