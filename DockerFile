@@ -8,7 +8,7 @@ WORKDIR /app
 COPY decoder.cpp .
 
 # Compile the program
-RUN g++ decoder.cpp -o main
+RUN g++ attention.cpp -o main
 
 # Run the executable
 ENTRYPOINT ["./main"]

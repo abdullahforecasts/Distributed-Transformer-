@@ -1,11 +1,16 @@
-//cc2
 
+
+// decoder.cpp
+#include <bits/stdc++.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <cerrno>
+#include <cstring>
 #include <iostream>
-#include <vector>
-#include <cmath>
-#include <cstdlib>
-#include <fstream>
 #include <string>
+#include <sstream>
+#include <unistd.h>
+
 using namespace std;
 
 // ================= CONFIG =================
@@ -46,6 +51,41 @@ Matrix Wv(embedding_dim, embedding_dim);
 Matrix W1(embedding_dim, hidden_dim);
 Matrix W2(hidden_dim, embedding_dim);
 Matrix Wout(embedding_dim, vocab_size);
+
+// ================= SERIALIZE / DESERIALIZE =================
+string serialize(const vector<vector<float>>& mat) {
+    string buffer;
+    size_t totalSize = sizeof(int) * 2 +
+                       sizeof(float) * mat.size() * mat[0].size();
+    buffer.resize(totalSize);
+    char* data = buffer.data();
+
+    int rows = mat.size(), cols = mat[0].size();
+    memcpy(data, &rows, sizeof(int)); data += sizeof(int);
+    memcpy(data, &cols, sizeof(int)); data += sizeof(int);
+
+    for (int i = 0; i < rows; i++)
+        for (int j = 0; j < cols; j++) {
+            memcpy(data, &mat[i][j], sizeof(float));
+            data += sizeof(float);
+        }
+    return buffer;
+}
+
+vector<vector<float>> deserialize(const string& buffer) {
+    const char* data = buffer.data();
+    int rows, cols;
+    memcpy(&rows, data, sizeof(int)); data += sizeof(int);
+    memcpy(&cols, data, sizeof(int)); data += sizeof(int);
+
+    vector<vector<float>> matrix(rows, vector<float>(cols));
+    for (int i = 0; i < rows; i++)
+        for (int j = 0; j < cols; j++) {
+            memcpy(&matrix[i][j], data, sizeof(float));
+            data += sizeof(float);
+        }
+    return matrix;
+}
 
 // ================= LOAD =================
 void load_matrix(Matrix &mat, const string &filename) {
@@ -120,31 +160,171 @@ void softmax_inplace(Matrix &x) {
     }
 }
 
-// ================= FORWARD =================
-Matrix embedTokens(const vector<int> &tokens) {
-    int T = tokens.size();
-    Matrix x(T, embedding_dim);
-    for (int i = 0; i < T; i++)
-        for (int j = 0; j < embedding_dim; j++)
-            x.m[i][j] = token_embedding.m[tokens[i]][j]
-                       + position_embedding.m[i][j];
-    return x;
+// ================= SOCKET HELPERS =================
+ssize_t recv_all(int socket_fd, void* data, size_t length) {
+    char* buffer = static_cast<char*>(data);
+    size_t total = 0;
+    while (total < length) {
+        ssize_t r = recv(socket_fd, buffer + total, length - total, 0);
+        if (r < 0) { if (errno == EINTR) continue; return -1; }
+        if (r == 0) return 0;
+        total += r;
+    }
+    return total;
 }
 
-Matrix selfAttention(const Matrix &x) {
-    int T = x.rows;
-    Matrix Q = multiply(x, Wq);
-    Matrix K = multiply(x, Wk);
-    Matrix V = multiply(x, Wv);
+bool send_all(int socket_fd, const void* data, size_t length) {
+    const char* buf = (const char*)data;
+    size_t sent_total = 0;
+    while (sent_total < length) {
+        ssize_t s = send(socket_fd, buf + sent_total, length - sent_total, 0);
+        if (s < 0) { if (errno == EINTR) continue; return false; }
+        if (s == 0) return false;
+        sent_total += s;
+    }
+    return true;
+}
 
-    Matrix scores = multiply(Q, transpose(K));
+bool send_with_size(int socket_fd, const void* data, uint32_t length) {
+    uint32_t net = htonl(length);
+    if (!send_all(socket_fd, &net, sizeof(net))) return false;
+    return send_all(socket_fd, data, length);
+}
+
+bool recv_with_size(int socket_fd, string& out) {
+    uint32_t net = 0;
+    if (recv_all(socket_fd, &net, sizeof(net)) <= 0) return false;
+    uint32_t len = ntohl(net);
+    out.resize(len);
+    return recv_all(socket_fd, out.data(), len) > 0;
+}
+
+// ================= SPLIT / MERGE HELPERS =================
+// Returns the left half (cols 0 .. half-1) of a matrix
+Matrix split_left(const Matrix& src) {
+    int half = src.cols / 2;
+    Matrix L(src.rows, half);
+    for (int i = 0; i < src.rows; i++)
+        for (int j = 0; j < half; j++)
+            L.m[i][j] = src.m[i][j];
+    return L;
+}
+
+// Returns the right half (cols half .. cols-1) of a matrix
+Matrix split_right(const Matrix& src) {
+    int half = src.cols / 2;
+    int right_cols = src.cols - half;
+    Matrix R(src.rows, right_cols);
+    for (int i = 0; i < src.rows; i++)
+        for (int j = 0; j < right_cols; j++)
+            R.m[i][j] = src.m[i][j + half];
+    return R;
+}
+
+// Merges left (cols 0..half-1) and right (cols half..end) back into one matrix
+Matrix merge_halves(const Matrix& L, const Matrix& R) {
+    int total_cols = L.cols + R.cols;
+    Matrix merged(L.rows, total_cols);
+    for (int i = 0; i < L.rows; i++) {
+        for (int j = 0; j < L.cols; j++)
+            merged.m[i][j] = L.m[i][j];
+        for (int j = 0; j < R.cols; j++)
+            merged.m[i][j + L.cols] = R.m[i][j];
+    }
+    return merged;
+}
+
+// ================= OFFLOAD RIGHT HALVES TO attention.cpp =================
+// Sends Q2, K2, V2, X to attention.cpp (server on port 8080),
+// receives the attention output for the right half back.
+Matrix offload_right_attention(const Matrix& Q2, const Matrix& K2,
+                                const Matrix& V2, const Matrix& X2) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { cerr << "socket() failed\n"; exit(1); }
+
+    sockaddr_in server{};
+    server.sin_family      = AF_INET;
+    server.sin_port        = htons(8080);
+    if (inet_pton(AF_INET, "127.0.0.1", &server.sin_addr) <= 0) {
+        cerr << "inet_pton failed\n"; exit(1);
+    }
+
+    if (connect(fd, (sockaddr*)&server, sizeof(server)) < 0) {
+        cerr << "connect() failed: " << strerror(errno) << "\n"; exit(1);
+    }
+
+    // Send Q2, K2, V2, X2 in order
+    auto send_mat = [&](const Matrix& mat) {
+        string buf = serialize(mat.m);
+        if (!send_with_size(fd, buf.data(), buf.size())) {
+            cerr << "send_with_size failed\n"; exit(1);
+        }
+    };
+
+    send_mat(Q2);
+    send_mat(K2);
+    send_mat(V2);
+    send_mat(X2);
+
+    // Receive the processed right-half attention output
+    string response;
+    if (!recv_with_size(fd, response)) {
+        cerr << "recv_with_size failed (attention output)\n"; exit(1);
+    }
+
+    close(fd);
+
+    auto out_mat = deserialize(response);
+    Matrix out(out_mat[0].size() > 0 ? out_mat.size() : 0,
+               out_mat[0].size());
+    out.m = out_mat;
+    out.rows = out_mat.size();
+    out.cols = out_mat[0].size();
+    return out;
+}
+
+// ================= SELF-ATTENTION WITH SPLIT/OFFLOAD/MERGE =================
+Matrix selfAttention(const Matrix &x) {
+    int T    = x.rows;
+    int half = embedding_dim / 2;
+
+    // Full Q, K, V projections
+    Matrix Q_full = multiply(x, Wq);   // T x embedding_dim
+    Matrix K_full = multiply(x, Wk);
+    Matrix V_full = multiply(x, Wv);
+
+    // --- Split into left (L) and right (R) halves along the col axis ---
+    Matrix Q1 = split_left(Q_full);   // T x half
+    Matrix Q2 = split_right(Q_full);  // T x half
+
+    Matrix K1 = split_left(K_full);
+    Matrix K2 = split_right(K_full);
+
+    Matrix V1 = split_left(V_full);
+    Matrix V2 = split_right(V_full);
+
+    // Also split x so the residual in the right attention block is correct
+    Matrix X1 = split_left(x);
+    Matrix X2 = split_right(x);
+
+    // --- Left half: compute attention locally ---
+    Matrix scores1 = multiply(Q1, transpose(K1));  // T x T
     for (int i = 0; i < T; i++)
         for (int j = i + 1; j < T; j++)
-            scores.m[i][j] = -1e9f;
+            scores1.m[i][j] = -1e9f;
+    softmax_inplace(scores1);
+    Matrix out1 = multiply(scores1, V1);           // T x half
+    Matrix attn_left = layerNorm(add(out1, X1));   // T x half
 
-    softmax_inplace(scores);
-    Matrix out = multiply(scores, V);
-    return layerNorm(add(out, x));
+    // --- Right half: offload to attention.cpp, wait, get result back ---
+    cout << "[decoder] Sending right half (Q2,K2,V2,X2) to attention.cpp...\n";
+    Matrix attn_right = offload_right_attention(Q2, K2, V2, X2);  // T x half
+    cout << "[decoder] Received right half attention output back.\n";
+
+    // --- Merge left and right attention outputs ---
+    Matrix attn_merged = merge_halves(attn_left, attn_right);  // T x embedding_dim
+
+    return attn_merged;
 }
 
 Matrix FFN(const Matrix &x) {
@@ -155,7 +335,16 @@ Matrix FFN(const Matrix &x) {
 }
 
 Matrix forward(const vector<int> &tokens) {
-    Matrix x = embedTokens(tokens);
+    Matrix x = [&]() {
+        int T = tokens.size();
+        Matrix emb(T, embedding_dim);
+        for (int i = 0; i < T; i++)
+            for (int j = 0; j < embedding_dim; j++)
+                emb.m[i][j] = token_embedding.m[tokens[i]][j]
+                             + position_embedding.m[i][j];
+        return emb;
+    }();
+
     x = selfAttention(x);
     x = FFN(x);
 
@@ -207,9 +396,9 @@ int main() {
     vector<char> test_starts = {'~', 'a', 'm', 'z'};
 
     // --- Single pass verification ---
-    cout << "============================================================" << endl;
-    cout << "SINGLE PASS VERIFICATION" << endl;
-    cout << "============================================================" << endl;
+    cout << "============================================================\n";
+    cout << "SINGLE PASS VERIFICATION\n";
+    cout << "============================================================\n";
 
     for (char start : test_starts) {
         vector<int> tokens = {encode(start)};
@@ -223,23 +412,25 @@ int main() {
         cout << "Start='" << start << "' | predicted='" << decode(best) << "' | probs: ";
         for (int i = 0; i < vocab_size; i++)
             cout << logits.m[0][i] << " ";
-        cout << endl;
+        cout << "\n";
     }
 
-    cout << endl;
+    cout << "\n";
 
     // --- 1000-char generation ---
-    cout << "============================================================" << endl;
-    cout << "1000-CHAR GENERATION" << endl;
-    cout << "============================================================" << endl;
+    cout << "============================================================\n";
+    cout << "1000-CHAR GENERATION\n";
+    cout << "============================================================\n";
 
     for (char start : test_starts) {
         string stream = generate(encode(start), 1000);
-        cout << "\nStart='" << start << "':" << endl;
+        cout << "\nStart='" << start << "':\n";
         for (int i = 0; i < 1000; i += 100)
-            cout << stream.substr(i, 100) << endl;
+            cout << stream.substr(i, 100) << "\n";
     }
 
     return 0;
 }
+
+
 
