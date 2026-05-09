@@ -19,6 +19,8 @@ const int embedding_dim = 32;
 const int hidden_dim = 64;
 const int block_size = 8;
 
+int attention_port = 8080;
+
 // ================= VOCAB =================
 vector<char> itos;
 
@@ -296,7 +298,7 @@ int connect_to_attention()
     }
     sockaddr_in server{};
     server.sin_family = AF_INET;
-    server.sin_port = htons(8080);
+    server.sin_port = htons(attention_port);
     if (inet_pton(AF_INET, "127.0.0.1", &server.sin_addr) <= 0)
     {
         cerr << "inet_pton failed\n";
@@ -445,8 +447,14 @@ string generate(int start_token, int steps)
 }
 
 // ================= MAIN =================
-int main()
+int main(int argc, char *argv[])
 {
+    if (argc < 2)
+    {
+        cerr << "usage: decoder <port>\n";
+        return 1;
+    }
+    attention_port = stoi(argv[1]);
     build_vocab();
 
     load_matrix(token_embedding, "token_embedding.weight.txt");
