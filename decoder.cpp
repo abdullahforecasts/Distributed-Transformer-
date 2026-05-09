@@ -363,13 +363,9 @@ Matrix selfAttention(const Matrix &x)
     Matrix V1 = split_left(V_full);
     Matrix V2 = split_right(V_full);
 
-    // Also split x so the residual in the right attention block is correct
-    Matrix X1 = split_left(x);
-    Matrix X2 = split_right(x);
-
     // send right half to attention.cpp first
     int fd = connect_to_attention();
-    send_right_half(fd, Q2, K2, V2, X2);
+    send_right_half(fd, Q2, K2, V2, x);
 
     // --- Left half: compute attention locally ---
     Matrix scores1 = multiply(Q1, transpose(K1)); // T x T
@@ -377,8 +373,8 @@ Matrix selfAttention(const Matrix &x)
         for (int j = i + 1; j < T; j++)
             scores1.m[i][j] = -1e9f;
     softmax_inplace(scores1);
-    Matrix out1 = multiply(scores1, V1);         // T x half
-    Matrix attn_left = layerNorm(add(out1, X1)); // T x half
+    Matrix out1 = multiply(scores1, V1);        // T x half
+    Matrix attn_left = layerNorm(add(out1, x)); // T x half
 
     // receive right half result
     Matrix attn_right = receive_right_half(fd);
