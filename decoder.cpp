@@ -1,5 +1,3 @@
-
-
 // decoder.cpp
 #include <bits/stdc++.h>
 #include <sys/socket.h>
@@ -10,6 +8,7 @@
 #include <string>
 #include <sstream>
 #include <unistd.h>
+#include <chrono>
 
 using namespace std;
 
@@ -347,6 +346,8 @@ Matrix receive_right_half(int fd)
 // ================= SELF-ATTENTION WITH SPLIT/OFFLOAD/MERGE =================
 Matrix selfAttention(const Matrix &x)
 {
+    auto start = chrono::high_resolution_clock::now();
+
     int T = x.rows;
     int half = embedding_dim / 2;
 
@@ -384,6 +385,12 @@ Matrix selfAttention(const Matrix &x)
 
     // --- Merge left and right attention outputs ---
     Matrix attn_merged = merge_halves(attn_left, attn_right); // T x embedding_dim
+
+    auto end = chrono::high_resolution_clock::now();
+    double ms = chrono::duration<double, milli>(end - start).count();
+
+    ofstream log("two_device.log", ios::app);
+    log << "selfAttention: " << ms << " ms\n";
 
     return attn_merged;
 }

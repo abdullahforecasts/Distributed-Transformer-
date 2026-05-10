@@ -319,10 +319,11 @@ int main(int argc, char *argv[])
              << "V2 (" << V.rows << "x" << V.cols << "), "
              << "X2 (" << X.rows << "x" << X.cols << ").\n";
 
-        // ---- Wait 2 seconds, doing nothing ----
+        /* ---- Wait 2 seconds, doing nothing ----
         cout << "[attention] Holding for 2 seconds...\n";
         sleep(2);
         cout << "[attention] Done waiting. Computing right-half attention...\n";
+        */
 
         // ---- Compute right-half self-attention ----
         Matrix result = selfAttention(X, Q, K, V);
