@@ -10,8 +10,8 @@ using namespace std;
 
 // ================= CONFIG =================
 const int vocab_size = 27;
-const int embedding_dim = 32;
-const int hidden_dim = 64;
+const int embedding_dim = 512;
+const int hidden_dim = 1024;
 const int block_size = 8;
 
 // ================= VOCAB =================
@@ -95,7 +95,7 @@ vector<vector<float>> deserialize(const string &buffer)
     return matrix;
 }
 
-// ================= LOAD =================
+/* ================= LOAD =================
 void load_matrix(Matrix &mat, const string &filename)
 {
     ifstream file(filename);
@@ -108,7 +108,15 @@ void load_matrix(Matrix &mat, const string &filename)
         for (int j = 0; j < mat.cols; j++)
             file >> mat.m[i][j];
 }
+*/
 
+void random_matrix(Matrix &mat)
+{
+    srand(42);
+    for (int i = 0; i < mat.rows; i++)
+        for (int j = 0; j < mat.cols; j++)
+            mat.m[i][j] = ((float)rand() / RAND_MAX) * 0.02f - 0.01f;
+}
 // ================= OPS =================
 Matrix add(const Matrix &a, const Matrix &b)
 {
@@ -271,14 +279,14 @@ int main()
 {
     build_vocab();
 
-    load_matrix(token_embedding, "token_embedding.weight.txt");
-    load_matrix(position_embedding, "position_embedding.weight.txt");
-    load_matrix(Wq, "Wq.weight.txt");
-    load_matrix(Wk, "Wk.weight.txt");
-    load_matrix(Wv, "Wv.weight.txt");
-    load_matrix(W1, "W1.weight.txt");
-    load_matrix(W2, "W2.weight.txt");
-    load_matrix(Wout, "Wout.weight.txt");
+    random_matrix(token_embedding);
+    random_matrix(position_embedding);
+    random_matrix(Wq);
+    random_matrix(Wk);
+    random_matrix(Wv);
+    random_matrix(W1);
+    random_matrix(W2);
+    random_matrix(Wout);
 
     vector<char> test_starts = {'~', 'a', 'm', 'z'};
 
