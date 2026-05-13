@@ -10,8 +10,8 @@ using namespace std;
 
 // ================= CONFIG =================
 const int vocab_size = 27;
-const int embedding_dim = 512;
-const int hidden_dim = 1024;
+const int embedding_dim = 1024;
+const int hidden_dim = 2048;
 const int block_size = 8;
 
 // ================= VOCAB =================

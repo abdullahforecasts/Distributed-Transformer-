@@ -12,13 +12,15 @@
 
 using namespace std;
 
+const int num_devices = 4;
+
 // ================= CONFIG =================
 const int vocab_size = 27;
-const int embedding_dim = 32;
-const int hidden_dim = 64;
+const int embedding_dim = 1024;
+const int hidden_dim = 2048;
 const int block_size = 8;
 
-int attention_port = 8080;
+int attention_ports[3];
 
 // ================= VOCAB =================
 vector<char> itos;
@@ -101,7 +103,7 @@ vector<vector<float>> deserialize(const string &buffer)
     return matrix;
 }
 
-// ================= LOAD =================
+/* ================= LOAD =================
 void load_matrix(Matrix &mat, const string &filename)
 {
     ifstream file(filename);
@@ -113,6 +115,14 @@ void load_matrix(Matrix &mat, const string &filename)
     for (int i = 0; i < mat.rows; i++)
         for (int j = 0; j < mat.cols; j++)
             file >> mat.m[i][j];
+}
+*/
+void random_matrix(Matrix &mat)
+{
+    srand(42);
+    for (int i = 0; i < mat.rows; i++)
+        for (int j = 0; j < mat.cols; j++)
+            mat.m[i][j] = ((float)rand() / RAND_MAX) * 0.02f - 0.01f;
 }
 
 // ================= OPS =================
@@ -248,28 +258,14 @@ bool recv_with_size(int socket_fd, string &out)
     return recv_all(socket_fd, out.data(), len) > 0;
 }
 
-// ================= SPLIT / MERGE HELPERS =================
-// Returns the left half (cols 0 .. half-1) of a matrix
-Matrix split_left(const Matrix &src)
+Matrix split_quarter(const Matrix &src, int q)
 {
-    int half = src.cols / 2;
-    Matrix L(src.rows, half);
+    int qsize = src.cols / 4;
+    Matrix Q(src.rows, qsize);
     for (int i = 0; i < src.rows; i++)
-        for (int j = 0; j < half; j++)
-            L.m[i][j] = src.m[i][j];
-    return L;
-}
-
-// Returns the right half (cols half .. cols-1) of a matrix
-Matrix split_right(const Matrix &src)
-{
-    int half = src.cols / 2;
-    int right_cols = src.cols - half;
-    Matrix R(src.rows, right_cols);
-    for (int i = 0; i < src.rows; i++)
-        for (int j = 0; j < right_cols; j++)
-            R.m[i][j] = src.m[i][j + half];
-    return R;
+        for (int j = 0; j < qsize; j++)
+            Q.m[i][j] = src.m[i][j + q * qsize];
+    return Q;
 }
 
 // Merges left (cols 0..half-1) and right (cols half..end) back into one matrix
@@ -287,22 +283,13 @@ Matrix merge_halves(const Matrix &L, const Matrix &R)
     return merged;
 }
 
-int connect_to_attention()
+int connect_to_attention(int port)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
-    {
-        cerr << "socket() failed\n";
-        exit(1);
-    }
     sockaddr_in server{};
     server.sin_family = AF_INET;
-    server.sin_port = htons(attention_port);
-    if (inet_pton(AF_INET, "127.0.0.1", &server.sin_addr) <= 0)
-    {
-        cerr << "inet_pton failed\n";
-        exit(1);
-    }
+    server.sin_port = htons(port);
+    inet_pton(AF_INET, "127.0.0.1", &server.sin_addr);
     if (connect(fd, (sockaddr *)&server, sizeof(server)) < 0)
     {
         cerr << "connect() failed: " << strerror(errno) << "\n";
@@ -349,47 +336,64 @@ Matrix selfAttention(const Matrix &x)
     auto start = chrono::high_resolution_clock::now();
 
     int T = x.rows;
-    int half = embedding_dim / 2;
 
     // Full Q, K, V projections
     Matrix Q_full = multiply(x, Wq); // T x embedding_dim
     Matrix K_full = multiply(x, Wk);
     Matrix V_full = multiply(x, Wv);
 
-    // --- Split into left (L) and right (R) halves along the col axis ---
-    Matrix Q1 = split_left(Q_full);  // T x half
-    Matrix Q2 = split_right(Q_full); // T x half
+    // split into 4 quarters
+    Matrix Q1 = split_quarter(Q_full, 0);
+    Matrix Q2 = split_quarter(Q_full, 1);
+    Matrix Q3 = split_quarter(Q_full, 2);
+    Matrix Q4 = split_quarter(Q_full, 3);
 
-    Matrix K1 = split_left(K_full);
-    Matrix K2 = split_right(K_full);
+    Matrix K1 = split_quarter(K_full, 0);
+    Matrix K2 = split_quarter(K_full, 1);
+    Matrix K3 = split_quarter(K_full, 2);
+    Matrix K4 = split_quarter(K_full, 3);
 
-    Matrix V1 = split_left(V_full);
-    Matrix V2 = split_right(V_full);
+    Matrix V1 = split_quarter(V_full, 0);
+    Matrix V2 = split_quarter(V_full, 1);
+    Matrix V3 = split_quarter(V_full, 2);
+    Matrix V4 = split_quarter(V_full, 3);
 
-    // send right half to attention.cpp first
-    int fd = connect_to_attention();
-    send_right_half(fd, Q2, K2, V2, x);
+    // connect and send to all 3 remote devices first
+    int fd1 = connect_to_attention(attention_ports[0]);
+    send_right_half(fd1, Q2, K2, V2, x);
 
-    // --- Left half: compute attention locally ---
-    Matrix scores1 = multiply(Q1, transpose(K1)); // T x T
+    int fd2 = connect_to_attention(attention_ports[1]);
+    send_right_half(fd2, Q3, K3, V3, x);
+
+    int fd3 = connect_to_attention(attention_ports[2]);
+    send_right_half(fd3, Q4, K4, V4, x);
+
+    // compute quarter 1 locally in the meantime
+    Matrix scores1 = multiply(Q1, transpose(K1));
     for (int i = 0; i < T; i++)
         for (int j = i + 1; j < T; j++)
             scores1.m[i][j] = -1e9f;
     softmax_inplace(scores1);
-    Matrix out1 = multiply(scores1, V1);        // T x half
-    Matrix attn_left = layerNorm(add(out1, x)); // T x half
+    Matrix out1 = multiply(scores1, V1);
+    Matrix attn_q1 = layerNorm(add(out1, x));
 
-    // receive right half result
-    Matrix attn_right = receive_right_half(fd);
-    close(fd);
+    // gather from all 3 remote devices
+    Matrix attn_q2 = receive_right_half(fd1);
+    close(fd1);
+    Matrix attn_q3 = receive_right_half(fd2);
+    close(fd2);
+    Matrix attn_q4 = receive_right_half(fd3);
+    close(fd3);
 
-    // --- Merge left and right attention outputs ---
-    Matrix attn_merged = merge_halves(attn_left, attn_right); // T x embedding_dim
+    // merge all 4 quarters
+    Matrix merged12 = merge_halves(attn_q1, attn_q2);
+    Matrix merged34 = merge_halves(attn_q3, attn_q4);
+    Matrix attn_merged = merge_halves(merged12, merged34);
 
     auto end = chrono::high_resolution_clock::now();
     double ms = chrono::duration<double, milli>(end - start).count();
 
-    ofstream log("two_device.log", ios::app);
+    ofstream log("four_device.log", ios::app);
     log << "selfAttention: " << ms << " ms\n";
 
     return attn_merged;
@@ -456,22 +460,25 @@ string generate(int start_token, int steps)
 // ================= MAIN =================
 int main(int argc, char *argv[])
 {
-    if (argc < 2)
+    if (argc < 4)
     {
-        cerr << "usage: decoder <port>\n";
+        cerr << "usage: decoder <port1> <port2> <port3>\n";
         return 1;
     }
-    attention_port = stoi(argv[1]);
+    attention_ports[0] = stoi(argv[1]);
+    attention_ports[1] = stoi(argv[2]);
+    attention_ports[2] = stoi(argv[3]);
+
     build_vocab();
 
-    load_matrix(token_embedding, "token_embedding.weight.txt");
-    load_matrix(position_embedding, "position_embedding.weight.txt");
-    load_matrix(Wq, "Wq.weight.txt");
-    load_matrix(Wk, "Wk.weight.txt");
-    load_matrix(Wv, "Wv.weight.txt");
-    load_matrix(W1, "W1.weight.txt");
-    load_matrix(W2, "W2.weight.txt");
-    load_matrix(Wout, "Wout.weight.txt");
+    random_matrix(token_embedding);
+    random_matrix(position_embedding);
+    random_matrix(Wq);
+    random_matrix(Wk);
+    random_matrix(Wv);
+    random_matrix(W1);
+    random_matrix(W2);
+    random_matrix(Wout);
 
     vector<char> test_starts = {'~', 'a', 'm', 'z'};
 

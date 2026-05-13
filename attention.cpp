@@ -257,7 +257,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    cout << "[attention] Server listening on port 8080...\n";
+    cout << "[attention] Server listening on port " << port << "...\n";
 
     // 4. Accept connections in a loop (one per forward() call from decoder)
     while (true)
